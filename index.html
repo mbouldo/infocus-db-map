@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>NYC Census Tract Map</title>
+
+    <link rel="stylesheet" href="vendor/leaflet.css" />
+
+    <style>
+        #map {
+          height: 1200px;
+        }
+        #load-buttons-container{
+          font-size:12px;
+        }
+    </style>
+</head>
+
+<body>
+  
+ 
+    <h3>Ranges:
+        <div id="stat-summary"></div>
+        <div id="multivar-summary"></div>
+    </h3>
+    <button onclick="markupMultivar()">Run Multivariate Model</button>
+
+    <div id="load-buttons-container">
+      Note: Segregation (+1 segregation towards greater privilege & -1 showing segregation towards less privilege), Gini: 0 = perfect equality, 1 = perfect inequality (1 household all wealth)
+      <br/> <input type="text" id="bincount" value="20"/>
+    </div>
+    <button onclick="showConcordance()">Normalized agreement score</button>
+    <div id="distribution_graph">
+
+    </div>
+    <div id="map"></div>
+
+    <script src="vendor/leaflet.js"></script>
+     <script src="vendor/jquery.js"></script>
+    <script src="vendor/chart.js"></script>
+    <script src="vendor/math.js"></script>
+    <script src="tiger.js"></script><script src="datasets.js"></script>
+    <script>
+// imported from tiger.js
+const censusGeoJSON = JSON.parse(tigerwebGeoJSON);
+
+let censusData = [];
+let lookup = {};
+let statSummary = {};
+const   geoidFields = ["GEOID","geoid","GEOID10","GEOID20"]
+const valueFields=  ["value","Value"]
+
+
+function parseCSV(str){
+  const rows=str.trim().split("\n");
+  const headers=rows[0].split("\t").map(h=>h.trim());
+  return rows.slice(1).map(row=>{
+    const values=row.split("\t");
+    return Object.fromEntries(headers.map((h,i)=>[h,values[i]?.trim()]));
+  });
+}
+
+function findField(row,fields){
+  for(const field of fields){
+    if(field in row) return field;
+  }
+  return null;
+}
+
+function getDatasetById(id){
+  const obj = datasetsObj.find(d => d.id === id) || "";
+  if(!obj) console.error("Dataset not found",id);
+  // parse the TSV string into an array of objects
+  const parsed = parseCSV(obj.data);
+  console.log(parsed)
+  return {
+    parsed: parsed,
+    name: obj.name,
+  }
+}
+
+function initDatasets(datasetName="dataset_1"){
+  const dataset = getDatasetById(datasetName);
+
+  if(!dataset.parsed.length){
+    console.error("Dataset empty");
+    return;
+  }
+
+  const parsed = dataset.parsed;
+
+  const geoidField=findField(parsed[0],["GEOID","geoid","GEOID10","GEOID20"]);
+  const valueField=findField(parsed[0],["value","Value"]);
+
+  if(!geoidField||!valueField){
+    console.error("Missing fields",{
+      columns:Object.keys(parsed[0]),
+      geoidField,
+      valueField
+    });
+    return;
+  }
+
+  censusData=parsed.map(row=>({
+    geoid:row[geoidField],
+    value:Number(row[valueField]),
+    raw:row
+  }));
+
+  lookup = Object.fromEntries(
+    censusData.map(d => [d.geoid, d])
+  );
+
+
+  censusData = parsed.map(row => ({
+    geoid: row[geoidField],
+    value: Number(row[valueField]),
+    raw: row
+  }));
+
+  const validValues = censusData
+    .map(d => d.value)
+    .filter(v => !isNaN(v) && v !== null && v !== "");
+
+  const sorted = [...validValues].sort((a,b) => a-b);
+
+  statSummary = {
+    min: Math.min(...validValues),
+    max: Math.max(...validValues),
+    mean: validValues.reduce((a,b)=>a+b,0) / validValues.length,
+    median: sorted.length % 2
+      ? sorted[Math.floor(sorted.length / 2)]
+      : (sorted[sorted.length/2 - 1] + sorted[sorted.length/2]) / 2,
+    naCount: censusData.length - validValues.length,
+    totalN: censusData.length
+  };
+
+  document.getElementById("stat-summary").innerHTML = `
+    Name: ${dataset.name} |
+    Min: ${statSummary.min.toFixed(3)} |
+    Max: ${statSummary.max.toFixed(3)} |
+    Mean: ${statSummary.mean.toFixed(3)} |
+    Median: ${statSummary.median.toFixed(3)} |
+    NA: ${statSummary.naCount} |
+    N: ${statSummary.totalN}
+  `;
+
+  console.log("Loaded dataset",{
+    rows:censusData.length,
+    geoidField,
+    valueField,
+    example:censusData[0]
+  });
+  renderDistributionGraph(censusData);
+  loadMapData();
+}
+
+function renderDistributionGraph(data) {
+  const values = data
+    .map(d => d.value)
+    .filter(v => Number.isFinite(v));
+
+  if (!values.length) return;
+
+  const container = document.getElementById("distribution_graph");
+
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+
+  // Freedman-Diaconis bin width
+  const sorted = [...values].sort((a, b) => a - b);
+  const q1 = sorted[Math.floor((sorted.length - 1) * 0.25)];
+  const q3 = sorted[Math.floor((sorted.length - 1) * 0.75)];
+  const iqr = q3 - q1;
+
+  let binCount = $("#bincount").val();
+
+  binCount = Math.min(Math.max(binCount, 5), 50);
+
+  const binWidth = (max - min) / binCount;
+
+  const bins = Array.from({ length: binCount }, (_, i) => ({
+    min: min + i * binWidth,
+    max: i === binCount - 1
+      ? max
+      : min + (i + 1) * binWidth,
+    count: 0
+  }));
+
+  values.forEach(value => {
+    let index = Math.floor((value - min) / binWidth);
+
+    // Include the maximum in the final bin
+    if (index >= binCount) index = binCount - 1;
+
+    bins[index].count++;
+  });
+
+  container.innerHTML = `
+    <canvas id="distribution_canvas"></canvas>
+  `;
+
+  const ctx = document
+    .getElementById("distribution_canvas")
+    .getContext("2d");
+
+  new Chart(ctx, {
+    type: "bar",
+    data: {
+      labels: bins.map(b =>
+        `${b.min.toFixed(2)}–${b.max.toFixed(2)}`
+      ),
+      datasets: [{
+        label: "Frequency (%)",
+        data: bins.map(b => (b.count / values.length) * 100),
+        counts: bins.map(b => b.count),
+        borderWidth: 1
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: {
+          title: {
+            display: true,
+            text: "Value"
+          }
+        },
+        y: {
+          beginAtZero: true,
+          title: {
+            display: true,
+            text: "Frequency"
+          },
+          ticks: {
+            precision: 0
+          }
+        }
+      },
+      plugins: {
+        legend: {
+          display: false
+        },
+        tooltip: {
+          callbacks: {
+            label: function(context) {
+              const percentage = context.parsed.y;
+              const count = context.dataset.counts[context.dataIndex];
+
+              return [
+                `Frequency: ${percentage.toFixed(2)}%`,
+                `Count: ${count.toLocaleString()}`
+              ];
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+function calculateConcordance(data1, data2){
+  const map2 = Object.fromEntries(
+    data2.map(d => [d.geoid, d.value])
+  );
+
+  return data1.map(d => {
+    const v2 = map2[d.geoid];
+
+    if(
+      d.value === null ||
+      v2 === undefined ||
+      isNaN(d.value) ||
+      isNaN(v2)
+    ){
+      return {
+        geoid: d.geoid,
+        value: null,
+        original: `1: ${d.value ?? "NA"}<br>2: ${v2 ?? "NA"}`
+      };
+    }
+
+    const agreement = 1 - (
+      Math.abs(d.value - v2) /
+      Math.max(Math.abs(d.value), Math.abs(v2), 1)
+    );
+
+    return {
+      geoid: d.geoid,
+      value: agreement,
+      original: `1: ${d.value}<br>2: ${v2}`
+    };
+  });
+}
+function showConcordance(datasetId1='dataset_1', datasetId2='dataset_2'){
+
+
+  const data1 = getDatasetById(datasetId1).parsed.map(row => ({
+    geoid: row[findField(row, geoidFields)],
+    value: Number(row[findField(row, valueFields)])
+  }));
+
+  const data2 = getDatasetById(datasetId2).parsed.map(row => ({
+    geoid: row[findField(row, geoidFields)],
+    value: Number(row[findField(row, valueFields)])
+  }));
+
+  censusData = calculateConcordance(data1, data2);
+
+lookup = Object.fromEntries(
+  censusData.map(d => [d.geoid, d])
+);
+
+  statSummary = {
+    min: Math.min(...censusData.map(d=>d.value).filter(v=>!isNaN(v))),
+    max: Math.max(...censusData.map(d=>d.value).filter(v=>!isNaN(v)))
+  };
+
+  document.getElementById("stat-summary").innerHTML = `
+    Concordance<br>
+    Min: ${statSummary.min.toFixed(3)}
+    Max: ${statSummary.max.toFixed(3)}
+  `;
+
+  loadMapData();
+}
+function loadMapData(){
+  censusGeoJSON.features.forEach(feature=>{
+    const id = feature.properties.GEOID ||
+      feature.properties.GEOID20 ||
+      feature.properties.GEOID10;
+
+    feature.properties.GEOID = id;
+
+    const data = lookup[id];
+
+    feature.properties.value = data?.value ?? null;
+    feature.properties.original = data?.original ?? null;
+  });
+
+  if(window.geoLayer) map.removeLayer(window.geoLayer);
+
+  window.geoLayer = L.geoJSON(censusGeoJSON,{
+    style(feature){
+      return {
+        fillColor:getColor(feature.properties.value),
+        fillOpacity:0.8,
+        weight:1,
+        color:"black"
+      };
+    },
+    onEachFeature(feature,layer){
+      layer.bindPopup(`
+        GEOID: ${feature.properties.GEOID}<br>
+        Concordance: ${feature.properties.value ?? "no data"}<br>
+        Original: ${feature.properties.original ?? "no data"}
+      `);
+    }
+  }).addTo(map);
+}
+
+function getColor(value){
+  if(value===null || value===undefined || isNaN(value)) return "#000";
+
+  // normalize against dataset min/max
+  const t = Math.min(
+    Math.max((value - statSummary.min) / (statSummary.max - statSummary.min), 0),
+    1
+  );
+
+  // red -> blue
+  const start = [255, 0, 0];   // min = red
+  const end   = [0, 0, 255];   // max = blue
+
+  const r = Math.round(start[0] + t * (end[0] - start[0]));
+  const g = Math.round(start[1] + t * (end[1] - start[1]));
+  const b = Math.round(start[2] + t * (end[2] - start[2]));
+
+  return `rgb(${r},${g},${b})`;
+}
+
+const map=L.map("map").setView([40.7128,-73.95],10);
+
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{
+  attribution:"&copy; OpenStreetMap contributors"
+}).addTo(map);
+
+
+// foreach datasets, add the buttons dynamically in
+$(document).ready(function() {
+  const loadButtonsContainer = $("#load-buttons-container");
+  datasetsObj.forEach(dataset => {
+    //loadButtonsContainer.append(`<button onclick="initDatasets('${dataset.id}')">Map ${dataset.name}</button>`);
+    // add Title, Checkbox, and Map Button
+    loadButtonsContainer.append(`
+      <span>
+        <input type="checkbox" id="checkbox_${dataset.id}" value="${dataset.id}" />
+        <label for="checkbox_${dataset.id}">${dataset.name}</label>
+        <button onclick="initDatasets('${dataset.id}')">Map</button>
+      </span>
+    `);
+  });
+  bindInputChange();
+});
+
+let selected_datasets = [];
+
+function bindInputChange(){
+$(document).on("change", 'input[type="checkbox"][id^="checkbox_"]', function() {
+    const datasetId = this.value;
+
+    if (this.checked) {
+        selected_datasets.push(datasetId);
+    } else {
+        selected_datasets = selected_datasets.filter(id => id !== datasetId);
+    }
+
+    console.log(selected_datasets);
+});
+}
+
+function getMultivariateData(selected_datasets) {
+    const datasets = selected_datasets.map(id => ({
+        id,
+        data: getDatasetById(id).parsed
+    }));
+
+    const rows = {};
+
+    datasets.forEach(dataset => {
+        const data = dataset.data;
+
+        const geoidField = findField(data[0], geoidFields);
+        const valueField = findField(data[0], valueFields);
+
+        data.forEach(row => {
+            const geoid = row[geoidField];
+            const value = Number(row[valueField]);
+
+            if (!rows[geoid]) {
+                rows[geoid] = { GEOID: geoid };
+            }
+
+            rows[geoid][dataset.id] = value;
+        });
+    });
+
+    
+    return Object.values(rows);
+}
+
+function runMultivariateModel() {
+
+    if (selected_datasets.length < 2) {
+        console.error("At least two datasets must be selected");
+        return;
+    }
+
+    // Last selected dataset = dependent variable
+    const dependentId = selected_datasets[selected_datasets.length - 1];
+
+    // Everything before it = predictors
+    const predictorIds = selected_datasets.slice(0, -1);
+
+    // Include Y when building merged rows
+    const rows = getMultivariateData(selected_datasets);
+
+    const completeRows = rows.filter(row =>
+        [dependentId, ...predictorIds].every(id =>
+            Object.hasOwn(row, id) &&
+            Number.isFinite(Number(row[id]))
+        )
+    );
+
+    const y = completeRows.map(row =>
+        Number(row[dependentId])
+    );
+
+    const X = completeRows.map(row => [
+        1,
+        ...predictorIds.map(id => Number(row[id]))
+    ]);
+
+    const Xt = math.transpose(X);
+
+    const beta = math.multiply(
+        math.inv(math.multiply(Xt, X)),
+        math.multiply(Xt, y)
+    );
+
+    // Predictions
+    const predictions = X.map(row =>
+        math.dot(row, beta)
+    );
+
+    // R²
+    const yMean = math.mean(y);
+
+    const ssTotal = y.reduce(
+        (sum, value) => sum + Math.pow(value - yMean, 2),
+        0
+    );
+
+    const ssResidual = y.reduce(
+        (sum, value, i) => sum + Math.pow(value - predictions[i], 2),
+        0
+    );
+
+    const rSquared = 1 - (ssResidual / ssTotal);
+
+    // Adjusted R²
+    const n = y.length;
+    const k = predictorIds.length;
+
+    const adjustedRSquared =
+        1 - ((1 - rSquared) * (n - 1) / (n - k - 1));
+
+    return {
+        n,
+        dependent: dependentId,
+        predictors: predictorIds,
+        coefficients: beta,
+        predictions,
+        rSquared,
+        adjustedRSquared
+    };
+}function createMultivarStats(model) {
+
+    const {
+        n,
+        rSquared,
+        adjustedRSquared
+    } = model;
+
+    return `
+        <div class="multivar-stats">
+
+            <div>
+                <strong>N</strong>
+                <span>${n.toLocaleString()}</span>
+            </div>
+
+            <div>
+                <strong>R²</strong>
+                <span>${rSquared.toFixed(4)}</span>
+            </div>
+
+            <div>
+                <strong>Adjusted R²</strong>
+                <span>${adjustedRSquared.toFixed(4)}</span>
+            </div>
+
+        </div>
+    `;
+}
+
+
+function createMultivarEquation(model) {
+
+    const {
+        dependent,
+        predictors,
+        coefficients
+    } = model;
+
+    const terms = predictors.map((id, i) => {
+
+        const coefficient = coefficients[i + 1];
+
+        return `
+            ${coefficient >= 0 ? '+' : '-'}
+            ${Math.abs(coefficient).toFixed(4)}(${id})
+        `;
+    }).join('');
+
+    return `
+        <div class="multivar-equation">
+
+            <strong>Equation</strong>
+
+            <div>
+                ${dependent} =
+                ${coefficients[0].toFixed(4)}
+                ${terms}
+            </div>
+
+        </div>
+    `;
+}
+
+
+function createPredictedValuesTable(model, predictedValues) {
+
+    const {
+        dependent,
+        predictors
+    } = model;
+
+    const rows = predictors.map(id => `
+        <tr>
+            <td>${id}</td>
+            <td>${predictedValues[id].toFixed(4)}</td>
+        </tr>
+    `).join('');
+
+    return `
+        <div class="multivar-predictions">
+
+            <strong>Predicted Values</strong>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Group</th>
+                        <th>Predicted ${dependent}</th>
+                    </tr>
+                </thead>
+
+                <tbody>
+                    ${rows}
+                </tbody>
+            </table>
+
+        </div>
+    `;
+}
+
+
+function createRatioTable(ratios, referenceGroup, referenceValue) {
+
+    const rows = ratios
+        .sort((a, b) => b.predicted - a.predicted)
+        .map(({ id, predicted, ratio, percentDifference }) => {
+
+            const difference = percentDifference === 0
+                ? "Reference"
+                : `${percentDifference > 0 ? "+" : ""}${percentDifference.toFixed(1)}%`;
+
+            return `
+                <tr>
+                    <td>${id}</td>
+                    <td>${predicted.toFixed(4)}</td>
+                    <td>${ratio.toFixed(3)}×</td>
+                    <td>${difference}</td>
+                </tr>
+            `;
+        })
+        .join('');
+
+    return `
+        <div class="multivar-ratios">
+
+            <strong>Predicted Value Ratios</strong>
+
+            <p>
+                Reference: ${referenceGroup}
+                (${referenceValue.toFixed(4)})
+            </p>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Group</th>
+                        <th>Predicted</th>
+                        <th>Ratio</th>
+                        <th>Difference vs. ${referenceGroup}</th>
+                    </tr>
+                </thead>
+
+                <tbody>
+                    ${rows}
+                </tbody>
+            </table>
+
+        </div>
+    `;
+}
+
+
+function createCoefficientTable(model) {
+
+    const {
+        predictors,
+        coefficients
+    } = model;
+
+    const rows = predictors.map((id, i) => `
+        <tr>
+            <td>${id}</td>
+            <td>${coefficients[i + 1].toFixed(6)}</td>
+        </tr>
+    `).join('');
+
+    return `
+        <div class="multivar-coefficients">
+
+            <strong>Coefficients</strong>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Predictor</th>
+                        <th>Coefficient</th>
+                    </tr>
+                </thead>
+
+                <tbody>
+                    ${rows}
+                </tbody>
+            </table>
+
+        </div>
+    `;
+}
+
+
+function markupMultivar() {
+
+    const model = runMultivariateModel();
+
+    if (!model) return;
+
+    const {
+        predictors,
+        coefficients
+    } = model;
+
+
+    // Predicted value for a hypothetical 100% composition
+    const predictedValues = {};
+
+    predictors.forEach(id => {
+
+        const values = predictors.map(predictor =>
+            predictor === id ? 1 : 0
+        );
+
+        predictedValues[id] = math.dot(
+            [1, ...values],
+            coefficients
+        );
+
+    });
+
+
+    // Highest predicted group = reference
+    const referenceGroup = predictors.reduce((a, b) =>
+        predictedValues[a] > predictedValues[b] ? a : b
+    );
+
+    const referenceValue = predictedValues[referenceGroup];
+
+
+    // Ratios relative to highest predicted group
+    const ratios = predictors.map(id => ({
+        id,
+        predicted: predictedValues[id],
+        ratio: predictedValues[id] / referenceValue,
+        percentDifference:
+            ((predictedValues[id] / referenceValue) - 1) * 100
+    }));
+
+
+    const html = `
+        <div class="multivar-model">
+
+            ${createMultivarStats(model)}
+
+            ${createMultivarEquation(model)}
+
+  
+
+        </div>
+    `;
+
+            //   ${createPredictedValuesTable(
+            //     model,
+            //     predictedValues
+            // )}
+
+            // ${createRatioTable(
+            //     ratios,
+            //     referenceGroup,
+            //     referenceValue
+            // )}
+
+            // ${createCoefficientTable(model)}
+
+    $("#multivar-summary").html(html);
+}
+    </script>
+
+</body>
+
+</html>
