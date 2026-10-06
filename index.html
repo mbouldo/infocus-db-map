@@ -13,16 +13,55 @@
         #load-buttons-container{
           font-size:12px;
         }
+        canvas {
+  max-height: 250px !important;
+  max-width:450px;
+}
+
+#odds-summary table {
+  border-collapse: collapse;
+  margin: 10px 0;
+}
+
+#odds-summary th,
+#odds-summary td {
+  padding: 6px 12px;
+  text-align: center;
+}
+
+#odds-summary th:first-child,
+#odds-summary td:first-child {
+  text-align: left;
+}
+
+#odds-summary th {
+  font-weight: 600;
+}
+.graph-group{
+  display: flex;
+  flex-wrap: wrap;
+}
     </style>
 </head>
 
 <body>
-  
- 
+  <button onclick="downloadCombinedDataAsJSONL()">Download Combined Data as JSONL</button>
+  <input type="text" id="global_or_local" value="global">
+  <input type="text" id="positive_or_abs" value="absolute">
+  <input type="text" id="segregationTypeInput" value="racial-segregation">
+  <input type="text" id="outcomeDataset" value="breast_cancer_screening">
+    <button onclick="runData()">Run Data</button>
     <h3>Ranges:
         <div id="stat-summary"></div>
         <div id="multivar-summary"></div>
     </h3>
+
+    <div id="regression-container"></div>
+ <!-- <canvas id="outcome-summary"></canvas> 
+  <canvas id="quartile-summary"></canvas>
+  <canvas id="outcome-by-quartile"></canvas> -->
+  <div id="odds-summary"></div>
+
     <button onclick="markupMultivar()">Run Multivariate Model</button>
 
     <div id="load-buttons-container">
@@ -30,6 +69,7 @@
       <br/> <input type="text" id="bincount" value="20"/>
     </div>
     <button onclick="showConcordance()">Normalized agreement score</button>
+    <div id="na_count"></div>
     <div id="distribution_graph">
 
     </div>
@@ -39,6 +79,7 @@
      <script src="vendor/jquery.js"></script>
     <script src="vendor/chart.js"></script>
     <script src="vendor/math.js"></script>
+    <script src="vendor/jstat.js"></script>
     <script src="tiger.js"></script><script src="datasets.js"></script>
     <script>
 // imported from tiger.js
@@ -49,7 +90,7 @@ let lookup = {};
 let statSummary = {};
 const   geoidFields = ["GEOID","geoid","GEOID10","GEOID20"]
 const valueFields=  ["value","Value"]
-
+let all_dataset_ids = [];
 
 function parseCSV(str){
   const rows=str.trim().split("\n");
@@ -71,8 +112,13 @@ function getDatasetById(id){
   const obj = datasetsObj.find(d => d.id === id) || "";
   if(!obj) console.error("Dataset not found",id);
   // parse the TSV string into an array of objects
-  const parsed = parseCSV(obj.data);
-  console.log(parsed)
+  const parsed = parseCSV(obj.data).filter(
+    row => row.County !== "Nassau County" && row.County !== "Suffolk County"
+  );
+
+  //Ignore Nassau County", "Suffolk County"
+
+
   return {
     parsed: parsed,
     name: obj.name,
@@ -156,6 +202,8 @@ function initDatasets(datasetName="dataset_1"){
 }
 
 function renderDistributionGraph(data) {
+  const naCount = data.filter(d => !Number.isFinite(d.value)).length;
+
   const values = data
     .map(d => d.value)
     .filter(v => Number.isFinite(v));
@@ -163,6 +211,14 @@ function renderDistributionGraph(data) {
   if (!values.length) return;
 
   const container = document.getElementById("distribution_graph");
+
+  // NA bucket, not plotted
+  const naPercent = (naCount / data.length) * 100;
+
+
+  container.innerHTML = `
+    <canvas id="distribution_canvas"></canvas>
+  `;
 
   const min = Math.min(...values);
   const max = Math.max(...values);
@@ -187,6 +243,7 @@ function renderDistributionGraph(data) {
     count: 0
   }));
 
+  let global_check = 0;
   values.forEach(value => {
     let index = Math.floor((value - min) / binWidth);
 
@@ -194,11 +251,13 @@ function renderDistributionGraph(data) {
     if (index >= binCount) index = binCount - 1;
 
     bins[index].count++;
+    global_check++;
   });
 
-  container.innerHTML = `
-    <canvas id="distribution_canvas"></canvas>
-  `;
+  $("#na_count").html(`
+    <strong>NA</strong>: ${naCount.toLocaleString()}
+    (${naPercent.toFixed(2)}%), ${global_check}
+  `);
 
   const ctx = document
     .getElementById("distribution_canvas")
@@ -237,6 +296,10 @@ function renderDistributionGraph(data) {
             precision: 0
           }
         }
+      },
+      interaction: {
+        mode: 'index',
+        intersect: false
       },
       plugins: {
         legend: {
@@ -391,6 +454,7 @@ L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",{
 $(document).ready(function() {
   const loadButtonsContainer = $("#load-buttons-container");
   datasetsObj.forEach(dataset => {
+    all_dataset_ids.push(dataset.id);
     //loadButtonsContainer.append(`<button onclick="initDatasets('${dataset.id}')">Map ${dataset.name}</button>`);
     // add Title, Checkbox, and Map Button
     loadButtonsContainer.append(`
@@ -637,8 +701,7 @@ function createRatioTable(ratios, referenceGroup, referenceValue) {
                 ? "Reference"
                 : `${percentDifference > 0 ? "+" : ""}${percentDifference.toFixed(1)}%`;
 
-            return `
-                <tr>
+            return `<tr>
                     <td>${id}</td>
                     <td>${predicted.toFixed(4)}</td>
                     <td>${ratio.toFixed(3)}×</td>
@@ -714,7 +777,6 @@ function createCoefficientTable(model) {
     `;
 }
 
-
 function markupMultivar() {
 
     const model = runMultivariateModel();
@@ -774,21 +836,761 @@ function markupMultivar() {
         </div>
     `;
 
-            //   ${createPredictedValuesTable(
-            //     model,
-            //     predictedValues
-            // )}
-
-            // ${createRatioTable(
-            //     ratios,
-            //     referenceGroup,
-            //     referenceValue
-            // )}
-
-            // ${createCoefficientTable(model)}
-
     $("#multivar-summary").html(html);
 }
+
+  const incomeCutoffs = {
+    ses1: 50000,
+    ses2: 100000,
+    ses3: 150000
+  };
+
+  // generate Income Cutoffs Label Map (ses1 = <50k, ses2 = 50k-100k, ses3 = 100k-150k, ses4 = >150k)
+  // dynamically
+  let incomeCutoffsLabelMap = {};
+  for(const [ses, cutoff] of Object.entries(incomeCutoffs)) {
+    if(ses === 'ses1') {
+      incomeCutoffsLabelMap[ses] = `< ${cutoff.toLocaleString()}`;
+    } else if(ses === 'ses2') {
+      incomeCutoffsLabelMap[ses] = `${incomeCutoffs['ses1'].toLocaleString()} - ${cutoff.toLocaleString()}`;
+    } else if(ses === 'ses3') {
+      incomeCutoffsLabelMap[ses] = `${incomeCutoffs['ses2'].toLocaleString()} - ${cutoff.toLocaleString()}`;
+    } 
+  }
+  incomeCutoffsLabelMap['ses4'] = `> ${incomeCutoffs['ses3'].toLocaleString()}`;
+
+
+
+  function logisticRegressionTable(segregationData,outcomeData,stratifierDataset,sesTitle, quartileModes='global', segregationMode = 'absolute', globalSegregationQuartiles = null, globalOutcomeMedian = null) {
+    // 1. Take outcome data and convert to Y/N using >= median as Y
+    const outcomeMedian = globalOutcomeMedian 
+    exportData[sesTitle] = {
+      title: incomeCutoffsLabelMap[sesTitle],
+      outcomeMedian: outcomeMedian,
+    }
+
+    $("#regression-container").append(`${sesTitle} ${incomeCutoffsLabelMap[sesTitle]}<br>`);
+
+    // outcomeData median:
+    // count outcomeData NaN 
+    const previousOutcomeLength = outcomeData.length;
+    outcomeData = outcomeData.filter(d => !isNaN(d.value) && d.value !== null && d.value !== "");
+    console.log(`Filtered outcomeData: ${previousOutcomeLength} -> ${outcomeData.length} Diff = ${previousOutcomeLength - outcomeData.length}`);
+    const trueMedian = math.median(outcomeData.map(d => Number(d.value)));
+
+
+
+
+    console.log("Outcome median:", outcomeMedian);
+
+    const validationCount = {
+      'below': 0,
+      'above': 0,
+      'equal': 0
+    }
+    // give outcome 0, 1 based on median, and write to the object.
+    const updatedOutcomeData = outcomeData.map(d => {
+      const value = Number(d.value);
+      if(value < outcomeMedian) {
+        validationCount.below++;
+      } else if (value > outcomeMedian) {
+        validationCount.above++;
+      } else {
+        validationCount.equal++;
+      }
+
+      return {
+        ...d,
+        y: value >= outcomeMedian ? 1 : 0
+      };
+    });
+
+    // remove segregation data NaN
+    const previousSegregationLength = segregationData.length;
+    segregationData = segregationData.filter(d => !isNaN(d.value) && d.value !== null && d.value !== "");
+    console.log(`Filtered segregationData: ${previousSegregationLength} -> ${segregationData.length} Diff = ${previousSegregationLength - segregationData.length}`);
+
+    // Add in absolute value into the object
+
+  const filterSegregationBy = segregationMode; // options: 'positive', 'negative', 'absolute'
+    if(filterSegregationBy=='positive'){
+      segregationData = segregationData.filter(d => Number(d.value) > 0);
+    }else if(filterSegregationBy=='negative'){
+      segregationData = segregationData.filter(d => Number(d.value) < 0);
+    }else if(filterSegregationBy=='absolute'){
+      //abs value:
+      segregationData = segregationData.map(d => ({
+        ...d,
+        value: Math.abs(Number(d.value))
+      }));
+    }else{
+      //keep all
+
+    }
+
+
+    const updatedSegregationData = segregationData.map(d => ({
+      ...d,
+      absValue: Number(d.value)
+    }));
+
+    console.log("Segregation data with absolute values:", updatedSegregationData);
+
+    // assign a quartile based on the absolute value of segregation
+    const absValues = updatedSegregationData.map(d => d.absValue);
+
+    let q1, q2, q3;
+    if(quartileModes =='global'){
+      q1 = globalSegregationQuartiles.q1;
+      q2 = globalSegregationQuartiles.q2;
+      q3 = globalSegregationQuartiles.q3;
+    }else{
+      q1 = math.quantileSeq(absValues, 0.25);
+      q2 = math.quantileSeq(absValues, 0.5);
+      q3 = math.quantileSeq(absValues, 0.75); 
+    }
+
+
+
+    console.log(`Quartiles: Q1=${q1}, Q2=${q2}, Q3=${q3}`);
+    // Assign quartiles to each data point
+
+    const validationQuartileCount = {
+      'Q1': 0,
+      'Q2': 0,
+      'Q3': 0,
+      'Q4': 0
+    };
+
+    const updatedSegregationDataWithQuartiles = updatedSegregationData.map(d => {
+      let quartile;
+      if(d.absValue <= q1) {
+        quartile = 'Q1';
+        validationQuartileCount.Q1++;
+      } else if(d.absValue <= q2) {
+        quartile = 'Q2';
+        validationQuartileCount.Q2++;
+      } else if(d.absValue <= q3) {
+        quartile = 'Q3';
+        validationQuartileCount.Q3++;
+      } else {
+        quartile = 'Q4';
+        validationQuartileCount.Q4++;
+      }
+      return {
+        ...d,
+        quartile
+      };
+    });
+
+    createLogisticRegressionCharts(
+      updatedOutcomeData,
+      updatedSegregationDataWithQuartiles,
+      outcomeMedian,
+      q1,
+      q2,
+      q3
+    );
+
+    const q1vsQ4 = calculateQ1vsQ4OddsRatio(
+      updatedOutcomeData,
+      updatedSegregationDataWithQuartiles
+    );
+
+    const oddsRatio = q1vsQ4.oddsRatio;
+
+    exportData[sesTitle].oddsRatio = oddsRatio;
+    exportData[sesTitle].q1 = q1;
+    exportData[sesTitle].q2 = q2;
+    exportData[sesTitle].q3 = q3;
+    // p value
+    exportData[sesTitle].pValue = q1vsQ4.pValue;
+    exportData[sesTitle].trueMedian = trueMedian;
+  }
+
+
+
+  let chartSetCount = 0;
+  function createLogisticRegressionCharts(
+    outcomeData,
+    segregationData,
+    outcomeMedian,
+    q1,
+    q2,
+    q3
+  ) {
+
+    // round q1/2/3 for display
+    q1 = Number(q1.toFixed(3));
+    q2 = Number(q2.toFixed(3));
+    q3 = Number(q3.toFixed(3));
+
+    // create divs within the regression container, but give ids so that can additionally can be rendered
+    chartSetCount++;
+    $("#regression-container").append(`
+        <div class="graph-group">
+          <canvas id="outcome-summary-${chartSetCount}"></canvas>
+          <canvas id="quartile-summary-${chartSetCount}"></canvas>
+          <canvas id="outcome-by-quartile-${chartSetCount}"></canvas>
+        </div>
+    `);
+
+    // ============================================================
+    // 1. OUTCOME SUMMARY
+    // ============================================================
+
+    const belowMedian = outcomeData.filter(
+      d => Number(d.value) < outcomeMedian
+    ).length;
+
+    const atOrAboveMedian = outcomeData.filter(
+      d => Number(d.value) >= outcomeMedian
+    ).length;
+
+    new Chart(document.getElementById(`outcome-summary-${chartSetCount}`), {
+      type: 'bar',
+      data: {
+        labels: [
+          `Y = 0 (< ${outcomeMedian})`,
+          `Y = 1 (≥ ${outcomeMedian})`
+        ],
+        datasets: [{
+          label: 'Number of observations',
+          data: [
+            belowMedian,
+            atOrAboveMedian
+          ],
+            backgroundColor: [
+              'red',   // Y = 0
+              'blue'   // Y = 1
+            ]
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          title: {
+            display: true,
+            text: `Outcome Classification (Median = ${outcomeMedian})`
+          },
+          subtitle: {
+            display: true,
+            text: `Outcome value cutoff: ${outcomeMedian}`
+          }
+        },
+        scales: {
+          y: {
+            beginAtZero: true,
+            ticks: {
+              precision: 0
+            }
+          }
+        }
+      }
+    });
+
+
+    // ============================================================
+    // 2. SEGREGATION QUARTILES
+    // ============================================================
+
+    const quartileCounts = {
+      Q1: 0,
+      Q2: 0,
+      Q3: 0,
+      Q4: 0
+    };
+
+    segregationData.forEach(d => {
+      quartileCounts[d.quartile]++;
+    });
+
+    new Chart(document.getElementById(`quartile-summary-${chartSetCount}`), {
+      type: 'bar',
+      data: {
+        labels: [
+          `Q1 (≤ ${q1})`,
+          `Q2 (${q1}–${q2})`,
+          `Q3 (${q2}–${q3})`,
+          `Q4 (> ${q3})`
+        ],
+        datasets: [{
+          label: 'Number of observations',
+          data: [
+            quartileCounts.Q1,
+            quartileCounts.Q2,
+            quartileCounts.Q3,
+            quartileCounts.Q4
+          ],
+        }],
+        
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          title: {
+            display: true,
+            text: 'Segregation Quartiles'
+          },
+          subtitle: {
+            display: true,
+            text: `Cutoffs: Q1 = ${q1}, Q2 = ${q2}, Q3 = ${q3}`
+          }
+        },
+        scales: {
+          y: {
+            beginAtZero: true,
+            ticks: {
+              precision: 0
+            }
+          }
+        }
+      }
+    });
+
+
+    // ============================================================
+    // 3. OUTCOME BY SEGREGATION QUARTILE
+    // ============================================================
+
+    const outcomeByQuartile = {
+      Q1: { 0: 0, 1: 0 },
+      Q2: { 0: 0, 1: 0 },
+      Q3: { 0: 0, 1: 0 },
+      Q4: { 0: 0, 1: 0 }
+    };
+
+    segregationData.forEach(seg => {
+
+      const outcome = outcomeData.find(
+        d => d.GEOID === seg.GEOID
+      );
+
+      if (outcome) {
+        outcomeByQuartile[seg.quartile][outcome.y]++;
+      }
+    });
+
+
+
+    new Chart(document.getElementById(`outcome-by-quartile-${chartSetCount}`), {
+      type: 'bar',
+      data: {
+        labels: ['Q1', 'Q2', 'Q3', 'Q4'],
+        datasets: [
+          {
+            label: `Y = 0 (< ${outcomeMedian})`,
+            data: [
+              outcomeByQuartile.Q1[0],
+              outcomeByQuartile.Q2[0],
+              outcomeByQuartile.Q3[0],
+              outcomeByQuartile.Q4[0]
+            ],
+            backgroundColor: 'red'
+          },
+          {
+            label: `Y = 1 (≥ ${outcomeMedian})`,
+            data: [
+              outcomeByQuartile.Q1[1],
+              outcomeByQuartile.Q2[1],
+              outcomeByQuartile.Q3[1],
+              outcomeByQuartile.Q4[1]
+            ],
+            backgroundColor: 'blue'
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          title: {
+            display: true,
+            text: 'Outcome by Segregation Quartile'
+          },
+          subtitle: {
+            display: true,
+            text: `Outcome cutoff = ${outcomeMedian} | Segregation cutoffs = ${q1}, ${q2}, ${q3}`
+          }
+        },
+        scales: {
+          x: {
+            stacked: true
+          },
+          y: {
+            stacked: true,
+            beginAtZero: true,
+            ticks: {
+              precision: 0
+            }
+          }
+        }
+      }
+    });
+  }
+  function calculateQ1vsQ4OddsRatio(outcomeData, segregationData) {
+
+    const table = {
+      Q1: { 0: 0, 1: 0 },
+      Q4: { 0: 0, 1: 0 }
+    };
+
+    segregationData.forEach(seg => {
+
+      if (seg.quartile !== 'Q1' && seg.quartile !== 'Q4') {
+        return;
+      }
+
+      const outcome = outcomeData.find(
+        d => d.GEOID === seg.GEOID
+      );
+
+      if (outcome) {
+        table[seg.quartile][outcome.y]++;
+      }
+    });
+
+    // 2x2 table
+    const a = table.Q1[1];
+    const b = table.Q1[0];
+    const c = table.Q4[1];
+    const d = table.Q4[0];
+
+    // Odds ratio: Q1 vs Q4
+    const oddsRatio = (a * d) / (b * c);
+
+    // Pearson chi-square
+    const n = a + b + c + d;
+
+    const chiSquare =
+      n * Math.pow((a * d) - (b * c), 2) /
+      ((a + b) * (c + d) * (a + c) * (b + d));
+
+    // df = 1
+
+
+    const pValue = 2 * (1 - jStat.normal.cdf(Math.sqrt(chiSquare), 0, 1));
+
+  const percentLower = (1 - oddsRatio) * 100;
+    const multiplier = 1 / oddsRatio;
+
+    $('#regression-container').append(`
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Yes</th>
+            <th>No</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th>Q1</th>
+            <td>${a}</td>
+            <td>${b}</td>
+          </tr>
+          <tr>
+            <th>Q4</th>
+            <td>${c}</td>
+            <td>${d}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        <strong>Odds Ratio (Q1 vs Q4):</strong> ${oddsRatio.toFixed(4)}
+        <strong> P-value:</strong> ${pValue} ${pValue.toExponential(4)}
+      </p>
+
+    `);
+    return {
+      table,
+      oddsRatio,
+      chiSquare,
+      pValue
+    };
+  }
+
+
+
+  let exportData = {};
+  function runData(){
+    $("#regression-container").html("");
+    exportData = {}
+    const segregationData = getDatasetById(document.getElementById('segregationTypeInput').value).parsed;
+    const outcomeData = getDatasetById(document.getElementById('outcomeDataset').value).parsed; //met_colorectal
+    const stratificationData = getDatasetById('household-income').parsed;
+    const globalSegregationMode = document.getElementById('positive_or_abs').value;
+    const globalQuartileMode = document.getElementById('global_or_local').value;
+    // or 'global'
+
+    let absValuesSeg = segregationData.map(d => Number(d.value));
+    absValuesSeg = absValuesSeg.filter(d => !isNaN(d) && d !== null && d !== "");
+
+    if(globalSegregationMode === 'absolute'){
+      absValuesSeg = absValuesSeg.map(d => Math.abs(d));
+    }
+
+    let globalSegregationQuartiles = {
+      q1: math.quantileSeq(absValuesSeg, 0.25),
+      q2: math.quantileSeq(absValuesSeg, 0.5),
+      q3: math.quantileSeq(absValuesSeg, 0.75)
+    }
+
+    let globalOutcomeMedian = math.median(outcomeData.map(d => Number(d.value)).filter(d => !isNaN(d) && d !== null && d !== ""));
+
+    const allModels = stratifyData(segregationData,outcomeData, stratificationData);
+    models = allModels.stratfied;
+
+    logisticRegressionTable(models['SES 1'].segregationData, models['SES 1'].outcomeData, models['SES 1'].stratifierData, 'ses1', globalQuartileMode, globalSegregationMode, globalSegregationQuartiles, globalOutcomeMedian);
+    logisticRegressionTable(models['SES 2'].segregationData, models['SES 2'].outcomeData, models['SES 2'].stratifierData, 'ses2', globalQuartileMode, globalSegregationMode, globalSegregationQuartiles, globalOutcomeMedian);
+    logisticRegressionTable(models['SES 3'].segregationData, models['SES 3'].outcomeData, models['SES 3'].stratifierData, 'ses3', globalQuartileMode, globalSegregationMode, globalSegregationQuartiles, globalOutcomeMedian);
+    logisticRegressionTable(models['SES 4'].segregationData, models['SES 4'].outcomeData, models['SES 4'].stratifierData, 'ses4', globalQuartileMode, globalSegregationMode, globalSegregationQuartiles, globalOutcomeMedian);
+
+    const headers = [
+      'SES',
+      'Odds Ratio',
+      'Norm',
+      'Outcome Median',
+      'True Median',
+      'p-value'
+    ];
+
+    const rows = [
+      ['SES', 'Odds Ratio', 'Norm', 'Outcome Median', 'True Median', 'p-value'],
+      ...Object.entries(exportData).map(([key, data]) => [
+        data.title,
+        data.oddsRatio,
+        1,
+        data.outcomeMedian,
+        data.trueMedian,
+        data.pValue
+      ])
+    ];
+
+    const table = rows
+      .map(row => row.join('\t'))
+      .join('\n');
+
+    //navigator.clipboard.writeText(table);
+
+        const combined = allModels.combined;
+
+    const jsonl = combined
+      .map(d => JSON.stringify(d))
+      .join('\n');
+
+    const blob = new Blob([jsonl], {
+      type: 'application/json'
+    });
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+
+    a.href = url;
+    a.download = 'combined_data.jsonl';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+
+    URL.revokeObjectURL(url);
+  }
+
+
+function stratifyData(
+  segregationData,
+  outcomeData,
+  stratifierDataset
+) {
+
+  const outcomeMap = new Map(
+    outcomeData.map(d => [d.GEOID, d])
+  );
+
+  const segregationMap = new Map(
+    segregationData.map(d => [d.GEOID, d])
+  );
+
+  const stratifierMap = new Map(
+    stratifierDataset.map(d => [d.GEOID, d])
+  );
+
+
+  // --------------------------------------------------
+  // Create combined dataset
+  // --------------------------------------------------
+
+  const combinedData = [];
+
+  for (const [GEOID, outcome] of outcomeMap) {
+
+    const segregation = segregationMap.get(GEOID);
+    const stratifier = stratifierMap.get(GEOID);
+
+    if (!segregation || !stratifier) continue;
+
+    const outcomeValue = Number(outcome.value);
+    const segregationValue = Number(segregation.value);
+    const income = Number(stratifier.value);
+
+    if (
+      isNaN(outcomeValue) ||
+      isNaN(segregationValue) ||
+      isNaN(income)
+    ) {
+      continue;
+    }
+
+    let ses;
+
+    if (income < incomeCutoffs.ses1) {
+      ses = 'SES 1';
+    } else if (income < incomeCutoffs.ses2) {
+      ses = 'SES 2';
+    } else if (income < incomeCutoffs.ses3) {
+      ses = 'SES 3';
+    } else {
+      ses = 'SES 4';
+    }
+
+    combinedData.push({
+      GEOID,
+      outcome: outcomeValue,
+      segregation: segregationValue,
+      income,
+      ses
+    });
+  }
+
+
+
+
+
+
+  // --------------------------------------------------
+  // Create stratified datasets
+  // --------------------------------------------------
+
+  const stratifiedDatasets = {
+    'SES 1': {
+      outcomeData: [],
+      segregationData: [],
+      stratifierData: []
+    },
+
+    'SES 2': {
+      outcomeData: [],
+      segregationData: [],
+      stratifierData: []
+    },
+
+    'SES 3': {
+      outcomeData: [],
+      segregationData: [],
+      stratifierData: []
+    },
+
+    'SES 4': {
+      outcomeData: [],
+      segregationData: [],
+      stratifierData: []
+    }
+  };
+
+
+  // --------------------------------------------------
+  // Populate stratified datasets
+  // --------------------------------------------------
+
+  combinedData.forEach(d => {
+
+    stratifiedDatasets[d.ses].outcomeData.push({
+      GEOID: d.GEOID,
+      value: d.outcome
+    });
+
+    stratifiedDatasets[d.ses].segregationData.push({
+      GEOID: d.GEOID,
+      value: d.segregation
+    });
+
+    stratifiedDatasets[d.ses].stratifierData.push({
+      GEOID: d.GEOID,
+      value: d.income
+    });
+
+  });
+
+
+  // --------------------------------------------------
+  // Return both
+  // --------------------------------------------------
+  console.log(combinedData)
+  return {
+    stratfied:stratifiedDatasets,
+    combined: combinedData
+  };
+}
+
+  function mapDatasetsTogether(unifier_id, datasets){
+
+
+    const unifiedDataset = [];
+
+    // unify each value by the unifier_id (GEOID) into a single array of objects, where each dataset's id is the key, and the value is the VALUE of the dataset
+
+    let quickMap = {};
+    for(let datasetid of datasets){
+      console.log(datasetid)
+      // get dataset:
+      const tempDataset = getDatasetById(datasetid);
+      const data = tempDataset.parsed;
+      for(let parsedRow of data){
+        console.log(parsedRow)
+        const geoId = parsedRow.GEOID;
+        if(quickMap[geoId] === undefined){
+          quickMap[geoId] = {
+            GEOID: geoId
+          };
+        }
+          quickMap[geoId][datasetid] = parsedRow.value;
+       
+      }
+    }
+
+    //keep only array values (collapse)
+    for(let geoId in quickMap){
+      unifiedDataset.push(quickMap[geoId]);
+    }
+
+    console.log("Unified dataset:", unifiedDataset);
+
+
+
+    return unifiedDataset;
+
+  }
+
+  function downloadCombinedDataAsJSONL() {
+    const combinedData = mapDatasetsTogether('GEOID', ['met_colorectal','racial-segregation', 'household-income', 'breast_cancer_screening', 'currently_smoke','obese_over_30BMI','history_of_cancer_dx','report_fair_or_poor_overall_health','dx_with_diabetes','high_cholesterol','dental_last_year']);
+
+    const jsonl = combinedData
+      .map(d => JSON.stringify(d))
+      .join('\n');
+
+    const blob = new Blob([jsonl], {
+      type: 'application/json'
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'combined_data.jsonl';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+  }
+
     </script>
 
 </body>
