@@ -7,7 +7,8 @@ BASE_DIR = Path(__file__).resolve().parent
 INPUT_FILES = [
     "tract_disparity_f.csv",
     "tract_economy_f.csv",
-    "tract_screening_f.csv"
+    "tract_screening_f.csv",
+    "tract_sociodemo_f.csv"
 ]
 
 OUTPUT_FILE = BASE_DIR / "us_data.jsonl"

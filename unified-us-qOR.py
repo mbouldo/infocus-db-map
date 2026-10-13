@@ -8,6 +8,7 @@ main_seg_var = "Racial Segregation"
 
 plot_cols = [
     "Met_Colon_Screen",
+    "Met_Breast_Screen"
 ]
 
 
@@ -47,7 +48,7 @@ else:
     print("No NaN values.")
 
 # Isolate only FIPS State ID 36 (New York), NJ is 34, VA 51, FL 12, AL 01 
-df = df[df["GEOID"].astype(str).str.startswith("34")].copy()
+#df = df[df["GEOID"].astype(str).str.startswith("34")].copy()
 
 # -----------------------------
 # Global SES quartiles
